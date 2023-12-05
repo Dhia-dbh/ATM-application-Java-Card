@@ -15,6 +15,6 @@ And then after, run the Bank UI java project to display the GUI.
   
 Please review the last section "Rapport Projet - DhiaAndElKamelCo" to get an idea of how the project functions and some code review.
 
-For further questions please contact me on my email dhiabenhamouda2002@gmail.com with "ATM-application-Java-Card | (Your question summary)" as email object
+For further questions please contact me on my email dhiabenhamouda2002@gmail.com or my partner's email elkamelyy@gmail.com with "ATM-application-Java-Card | (Your question summary)" as email object
 
 ! Thank you for your support !
