@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<session version="1.0">&#x0A;<refactoring comment="Delete resource &apos;ATM_application_Java_Card_UI&apos;" deleteContents="false" description="Delete resource &apos;ATM_application_Java_Card_UI&apos;" element1="/ATM_application_Java_Card_UI" flags="7" id="org.eclipse.ltk.core.refactoring.delete.resources" resources="1" stamp="1701346737825"/>&#x0A;<refactoring comment="Delete resource &apos;ATM-application-Java-Card_Eclipse&apos;" deleteContents="false" description="Delete resource &apos;ATM-application-Java-Card_Eclipse&apos;" element1="/ATM-application-Java-Card_Eclipse" flags="7" id="org.eclipse.ltk.core.refactoring.delete.resources" resources="1" stamp="1701346882540"/>
+</session>

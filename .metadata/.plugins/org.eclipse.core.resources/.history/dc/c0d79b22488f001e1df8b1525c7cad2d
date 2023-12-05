@@ -1,0 +1,269 @@
+package exemple.com;
+
+import javacard.framework.APDU;
+import javacard.framework.Applet;
+import javacard.framework.ISO7816;
+import javacard.framework.ISOException;
+import javacard.framework.OwnerPIN;
+import javacard.framework.Util;
+import javacard.framework.JCSystem;
+
+public class Bank extends Applet {
+
+	/* Constants */
+	private static final byte CLA_MONAPPLET = (byte) 0xB0;
+	private static final byte INS_TEST_CODE_PIN = 0x00;
+	private static final byte INS_INTERROGER_COMPTE = 0x01;
+	private static final byte INS_INCREMENTER_COMPTE = 0x02;
+	private static final byte INS_DECREMENTER_COMPTE = 0x03;
+	private static final byte INS_INITIALISER_COMPTE = 0x04;
+
+	private final static int MAX_BALANCE = 0xFFFFFF;// le maximum de la balance
+
+	private final static byte MAX_MONTANT_TRANSACTION = (byte)127;// maximum montant
+															// qu'on peut
+															// transiter
+
+	private final static byte MAX_ERROR_PIN = (byte) 0x03;// maximum de code pin
+															// erroner
+
+	private final static byte MAX_PIN_LENGTH = (byte) 0x04;// longeur maximale du
+															// code pin
+
+	
+	private byte[] INIT_PIN = { (byte) 1, (byte) 1,(byte) 1,(byte) 1 };
+	
+	/* Exception */
+
+	// Verification Pin Echoué
+	private final static short SW_VERIFICATION_FAILED = 0x6300;
+
+	private final static short SW_EXCEED_TRY_LIMIT = 0x6321;
+	// signal the the PIN validation is required
+	// for a credit or a debit transaction
+
+	// signal that the balance exceed the maximum
+	private final static short SW_EXCEED_MAXIMUM_BALANCE = 0x6A84;
+	// signal the the balance becomes negative
+	private final static short SW_NEGATIVE_BALANCE = 0x6A85;
+	
+	private final static short SW_ROUGE=0x6320;
+	
+	private final static int MAX_ROUGE=1000;
+
+
+	/* variables */
+	OwnerPIN pin;
+	private static int balance ;
+	private byte[] transition_buffer = JCSystem.makeTransientByteArray((short) 3, JCSystem.CLEAR_ON_RESET);
+
+	private Bank(byte[] bArray,int i,int j) {
+		pin = new OwnerPIN(MAX_ERROR_PIN, MAX_PIN_LENGTH);
+		balance = MAX_ROUGE;
+
+		// Initialization parametre pin
+		pin.update(INIT_PIN,(short) 0, (byte) 0x04);
+	    
+	}
+
+	public static void install(byte bArray[], short bOffset, byte bLength) throws ISOException {
+		new Bank(bArray,bOffset,bLength).register();
+	}
+	
+	public boolean select() {
+
+		// pas de selection si le pin est blocker
+		if (pin.getTriesRemaining() == 0)
+			return false;
+
+		return true;
+	}
+	
+	public void deselect() {
+	    pin.reset();
+	}
+
+	public void process(APDU apdu) {
+		// Buffer=Objet APDU porte un tableau tampon de byte qui transfére
+				// l'entete + data entre la carte et le CAD
+				// du APDU entrant et sortant
+
+				byte[] buffer = apdu.getBuffer();
+
+				// exception qui teste sur la commande de selection
+				if (apdu.isISOInterindustryCLA()) {
+					if (buffer[ISO7816.OFFSET_INS] == (byte) (0xA4)) {
+						return;
+					} else {
+						ISOException.throwIt(ISO7816.SW_CLA_NOT_SUPPORTED);
+					}
+				}
+
+				// Vérifier si réinitialisation a une CLA correcte qui spécifie la
+				// structure de commandement
+				if (this.selectingApplet())
+					return;
+				if (buffer[ISO7816.OFFSET_CLA] != CLA_MONAPPLET) {
+					ISOException.throwIt(ISO7816.SW_CLA_NOT_SUPPORTED);
+				}
+
+				switch (buffer[ISO7816.OFFSET_INS]) {
+				case INS_TEST_CODE_PIN:
+					verify(apdu);
+					break;
+				case INS_INCREMENTER_COMPTE:
+					credit(apdu);
+					break;
+				case INS_DECREMENTER_COMPTE:
+					debit(apdu);
+					break;
+				case INS_INTERROGER_COMPTE:
+					getBalance(apdu);
+					break;
+				case INS_INITIALISER_COMPTE:
+					setBalance(apdu);
+					break;
+
+				default:
+					ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
+				}
+
+			}
+	
+	
+	private void credit(APDU apdu) {
+		
+
+		byte[] buffer = apdu.getBuffer();
+
+		// Lc byte denotes the number of bytes in the
+		// data field of the command APDU
+		byte numBytes = buffer[ISO7816.OFFSET_LC];
+
+		// indicate that this APDU has incoming data
+		// and receive data starting from the offset
+		// ISO7816.OFFSET_CDATA following the 5 header
+		// bytes.
+		byte byteRead = (byte) (apdu.setIncomingAndReceive());
+
+		// it is an error if the number of data bytes
+		// read does not match the number in Lc byte
+		if ((numBytes != 2) || (byteRead != 2))
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+
+		// get the credit amount
+		short creditAmount = Util.getShort(buffer, ISO7816.OFFSET_CDATA);	
+
+		// check the new balance
+		if ( (balance + creditAmount) > MAX_BALANCE)
+			ISOException.throwIt(SW_EXCEED_MAXIMUM_BALANCE);
+
+		// credit the amount
+		balance = (balance + (int) creditAmount);
+
+		
+	}
+	
+	private void debit(APDU apdu) {
+
+
+		byte[] buffer = apdu.getBuffer();
+
+		byte numBytes = (byte) (buffer[ISO7816.OFFSET_LC]);
+
+		byte byteRead = (byte) (apdu.setIncomingAndReceive());
+
+		if ((numBytes != 2) || (byteRead != 2))
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+
+		// Get debit amount
+		short debitAmount = Util.getShort(buffer, ISO7816.OFFSET_CDATA);
+
+		// check the new balance
+		if ((balance - debitAmount) < 0)
+			ISOException.throwIt(SW_NEGATIVE_BALANCE);
+		
+		
+		
+		balance = (balance - (int) debitAmount);
+		
+		if (balance <MAX_ROUGE)
+			ISOException.throwIt(SW_ROUGE);
+		
+
+	}
+	
+	
+	private void getBalance(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+		
+		short le = apdu.setOutgoing();
+
+		if (le < 2)
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+
+		apdu.setOutgoingLength((byte) 3);
+		
+		buffer[0] = (byte) ((balance >> 16) & 0xFF);
+		buffer[1] = (byte) ((balance >> 8) & 0xFF);
+		buffer[2] = (byte) (balance & 0xFF);
+		
+		apdu.sendBytes((short) 0, (short) 3);
+		
+	}
+	
+	private void setBalance(APDU apdu) {
+		
+
+		byte[] buffer = apdu.getBuffer();
+
+		// Lc byte denotes the number of bytes in the
+		// data field of the command APDU
+		byte numBytes = buffer[ISO7816.OFFSET_LC];
+
+		// indicate that this APDU has incoming data
+		// and receive data starting from the offset
+		// ISO7816.OFFSET_CDATA following the 5 header
+		// bytes.
+		byte byteRead = (byte) (apdu.setIncomingAndReceive());
+
+		// it is an error if the number of data bytes
+		// read does not match the number in Lc byte
+		if ((numBytes != 3) || (byteRead != 3))
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+
+		// get the credit amount
+		short creditAmount = Util.getShort(buffer, ISO7816.OFFSET_CDATA);
+		Util.arrayCopyNonAtomic(buffer, ISO7816.OFFSET_CDATA, transition_buffer, (short) 0, byteRead);
+		
+		
+		//Convert the bytes from the buffer to a number
+		balance = transition_buffer[byteRead];
+		//i starts from -2 since the first element is already taken into account
+		for(byte i = (byte) (byteRead - 2); i >= 0; i--) { 
+			balance += transition_buffer[i] * pow(10, (int) byteRead - i - 1);
+		}
+		
+	}
+	
+	private int pow(int a, int n) {
+		int result = 1;
+		for(byte i = 0; i < n; i++) {
+			result *= a;
+		}
+		return result;
+	}
+	
+	private void verify(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+		byte byteRead = (byte) (apdu.setIncomingAndReceive());
+		if(pin.getTriesRemaining()==(byte) 1)
+			ISOException.throwIt(SW_EXCEED_TRY_LIMIT);
+		if (pin.check(buffer, ISO7816.OFFSET_CDATA, byteRead) == false)
+			ISOException.throwIt(SW_VERIFICATION_FAILED);
+		
+	}
+	
+
+
+}

@@ -1,0 +1,286 @@
+package exemple.com;
+
+import javacard.framework.APDU;
+import javacard.framework.Applet;
+import javacard.framework.ISO7816;
+import javacard.framework.ISOException;
+import javacard.framework.OwnerPIN;
+import javacard.framework.Util;
+import javacard.framework.JCSystem;
+import javacard.security.MessageDigest;
+
+public class Bank extends Applet {
+
+	/* Code des instructions */
+	private static final byte CLA_MONAPPLET = (byte) 0xB0;
+	private static final byte INS_VERIF_PIN = 0x00;
+	private static final byte INS_INTERROGER_COMPTE = 0x01;
+	private static final byte INS_INCREMENTER_COMPTE = 0x02;
+	private static final byte INS_DECREMENTER_COMPTE = 0x03;
+	private static final byte INS_INITIALISER_COMPTE = 0x04;
+
+	/* Constants */
+	private final static int MAX_BALANCE = 2001000; // Solde Maximum permis
+	private final static byte MAX_ERROR_PIN = (byte) 0x03; // Nombre Maximal de tentatives permises
+	private final static byte PIN_LENGTH = (byte) 0x04; // Longeur du code PIN
+
+	
+	private byte[] INIT_PIN = { (byte) 1, (byte) 1,(byte) 1,(byte) 1 };
+	
+	/* Exception */
+
+	// Verification Pin Echou
+	private final static short SW_VERIFICATION_FAILED = 0x6300;
+
+	private final static short SW_EXCEED_TRY_LIMIT = 0x6321;
+	// signal the the PIN validation is required
+	// for a credit or a debit transaction
+
+	// signal that the balance exceed the maximum
+	private final static short SW_EXCEED_MAXIMUM_BALANCE = 0x6A84;
+	// signal the the balance becomes negative
+	private final static short SW_NEGATIVE_BALANCE = 0x6A85;
+	
+	private final static short SW_ROUGE=0x6320;
+	
+	private final static int MAX_ROUGE=1000;
+	private final static short TRANSIENT_BUFFER_SIZE = (byte) 127;
+
+
+	/* variables */
+	OwnerPIN pin;
+	private static int balance ;
+	private byte[] transition_buffer;
+	private byte[] hashedPIN;
+	private MessageDigest sha256;
+	private byte remainingTries;
+
+	private Bank(byte[] bArray,int i,int j) {
+		
+		pin = new OwnerPIN(MAX_ERROR_PIN, PIN_LENGTH);
+		balance = MAX_ROUGE;
+		transition_buffer = JCSystem.makeTransientByteArray((short) TRANSIENT_BUFFER_SIZE, JCSystem.CLEAR_ON_RESET);
+		remainingTries = MAX_ERROR_PIN;
+		//intilaize hash object
+		sha256 = MessageDigest.getInstance(MessageDigest.ALG_SHA_256, false);
+		// Allocate memory for HashedPIN
+		hashedPIN = new byte[] {(byte) 0x27, (byte) 0xEC, (byte) 0xD0, (byte) 0xA5, (byte) 0x98, (byte) 0xE7, (byte) 0x6F, (byte) 0x8A,
+				(byte) 0x2F, (byte) 0xD2, (byte) 0x64, (byte) 0xD4, (byte) 0x27, (byte) 0xDF, (byte) 0x0A, (byte) 0x11,
+				(byte) 0x99, (byte) 0x03, (byte) 0xE8, (byte) 0xEA, (byte) 0xE3, (byte) 0x84, (byte) 0xE4, (byte) 0x78,
+				(byte) 0x90, (byte) 0x25, (byte) 0x41, (byte) 0x75, (byte) 0x6F, (byte) 0x08, (byte) 0x9D, (byte) 0xD1}; //hash for code 1111
+		
+		//SHA-256 produces a 32-byte hash
+		// Initialization parametre pin
+		pin.update(INIT_PIN,(short) 0, (byte) 0x04);
+	    
+	}
+
+	public static void install(byte bArray[], short bOffset, byte bLength) throws ISOException {
+		new Bank(bArray,bOffset,bLength).register();
+	}
+	
+	public boolean select() {
+
+		// pas de selection si le pin est blocker
+		if (pin.getTriesRemaining() == 0)
+			return false;
+
+		return true;
+	}
+	
+	public void deselect() {
+	    pin.reset();
+	}
+
+	public void process(APDU apdu) {
+		// Buffer=Objet APDU porte un tableau tampon de byte qui transf�re
+				// l'entete + data entre la carte et le CAD
+				// du APDU entrant et sortant
+
+				byte[] buffer = apdu.getBuffer();
+
+				// exception qui teste sur la commande de selection
+				if (apdu.isISOInterindustryCLA()) {
+					if (buffer[ISO7816.OFFSET_INS] == (byte) (0xA4)) {
+						return;
+					} else {
+						ISOException.throwIt(ISO7816.SW_CLA_NOT_SUPPORTED);
+					}
+				}
+
+				// Vérifier si r�initialisation a une CLA correcte qui sp�cifie la
+				// structure de commandement
+				if (this.selectingApplet())
+					return;
+				if (buffer[ISO7816.OFFSET_CLA] != CLA_MONAPPLET) {
+					ISOException.throwIt(ISO7816.SW_CLA_NOT_SUPPORTED);
+				}
+
+				switch (buffer[ISO7816.OFFSET_INS]) {
+				case INS_VERIF_PIN:
+					verifyPIN(apdu);
+					break;
+				case INS_INCREMENTER_COMPTE:
+					credit(apdu);
+					break;
+				case INS_DECREMENTER_COMPTE:
+					debit(apdu);
+					break;
+				case INS_INTERROGER_COMPTE:
+					getBalance(apdu);
+					break;
+				case INS_INITIALISER_COMPTE:
+					setBalance(apdu);
+					break;
+
+				default:
+					ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
+				}
+
+			}
+	
+	
+	private void credit(APDU apdu) {
+		
+
+		byte[] buffer = apdu.getBuffer();
+
+		// Lc byte denotes the number of bytes in the
+		// data field of the command APDU
+		byte numBytes = buffer[ISO7816.OFFSET_LC];
+
+		// indicate that this APDU has incoming data
+		// and receive data starting from the offset
+		// ISO7816.OFFSET_CDATA following the 5 header
+		// bytes.
+		byte byteRead = (byte) (apdu.setIncomingAndReceive());
+
+		// it is an error if the number of data bytes
+		// read does not match the number in Lc byte
+		if ((numBytes != 2) || (byteRead != 2))
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+
+		// get the credit amount
+		short creditAmount = Util.getShort(buffer, ISO7816.OFFSET_CDATA);	
+
+		// check the new balance
+		if ( (balance + creditAmount) > MAX_BALANCE)
+			ISOException.throwIt(SW_EXCEED_MAXIMUM_BALANCE);
+
+		// credit the amount
+		balance = (balance + (int) creditAmount);
+
+		
+	}
+	
+	private void debit(APDU apdu) {
+
+
+		byte[] buffer = apdu.getBuffer();
+
+		byte numBytes = (byte) (buffer[ISO7816.OFFSET_LC]);
+
+		byte byteRead = (byte) (apdu.setIncomingAndReceive());
+
+		if ((numBytes != 2) || (byteRead != 2))
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+
+		// Get debit amount
+		short debitAmount = Util.getShort(buffer, ISO7816.OFFSET_CDATA);
+
+		// check the new balance
+		if ((balance - debitAmount) < 0)
+			ISOException.throwIt(SW_NEGATIVE_BALANCE);
+		
+		
+		
+		balance = (balance - (int) debitAmount);
+		
+		if (balance <MAX_ROUGE)
+			ISOException.throwIt(SW_ROUGE);
+	}
+	
+	
+	private void getBalance(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+		
+		short le = apdu.setOutgoing();
+
+		if (le < 2)
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+
+		apdu.setOutgoingLength((byte) 3);
+		
+		buffer[0] = (byte) ((balance >> 16) & 0xFF);
+		buffer[1] = (byte) ((balance >> 8) & 0xFF);
+		buffer[2] = (byte) (balance & 0xFF);
+		
+		apdu.sendBytes((short) 0, (short) 3);
+		
+	}
+	
+	private void setBalance(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+
+		// Lc byte denotes the number of bytes in the
+		// data field of the command APDU
+		byte numBytes = buffer[ISO7816.OFFSET_LC];
+
+		// indicate that this APDU has incoming data
+		// and receive data starting from the offset
+		// ISO7816.OFFSET_CDATA following the 5 header
+		// bytes.
+		byte byteRead = (byte) (apdu.setIncomingAndReceive());
+
+		// it is an error if the number of data bytes
+		// read does not match the number in Lc byte
+		if ((numBytes != TRANSIENT_BUFFER_SIZE) || (byteRead != TRANSIENT_BUFFER_SIZE))
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+		
+		Util.arrayCopyNonAtomic(buffer, ISO7816.OFFSET_CDATA, transition_buffer, (short) 0, byteRead);
+		
+		int a_z=0;
+		for(short i= (0); i < byteRead - 1 ; i++) {
+			a_z += transition_buffer[i];
+		}
+		balance = a_z * 127 + transition_buffer[byteRead-1];
+		/*byte a = transition_buffer[0];
+		byte b = transition_buffer[1];
+		byte c = transition_buffer[2];
+		// Credit the amount
+		balance = ((int) (a + b) * 127) + (int) c;*/
+	}
+	
+	private void verifyPIN(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+		//byte byteRead = (byte) (apdu.setIncomingAndReceive());
+		if(remainingTries==(byte) 1)
+			ISOException.throwIt(SW_EXCEED_TRY_LIMIT);
+		remainingTries--;		
+		//Check the resemblance of the hashed PIN and the stored PIN
+		if(verifyPINHash(buffer, (short) ISO7816.OFFSET_CDATA, PIN_LENGTH) == false)
+			ISOException.throwIt(SW_VERIFICATION_FAILED);
+	}
+	
+	private void setPIN(byte[] buffer, short offset, short length) {
+        // Perform PIN hashing and store the hashed
+        hashAndStorePIN(buffer, offset, length);
+    }
+
+    private void hashAndStorePIN(byte[] pinBuffer, short pinOffset, short pinLength) {
+    	// Hash the PIN using SHA-256
+    	sha256.reset();
+    	sha256.doFinal(pinBuffer, pinOffset, pinLength, hashedPIN, (short) 0);
+    }
+
+    private boolean verifyPINHash(byte[] pinBuffer, short pinOffset, short pinLength) {
+    	
+        byte[] inputHash = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
+        // Hash the provided PIN
+        sha256.reset();
+        sha256.doFinal(pinBuffer, pinOffset, pinLength, inputHash, (short) 0);
+        // Compare the hashed PINs and return the result
+        return Util.arrayCompare(inputHash, (short) 0, hashedPIN, (short) 0, (short) 32) == 0;
+    }
+
+}
